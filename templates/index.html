@@ -114,6 +114,7 @@
     <div id="map"></div>
 
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
 
     <script>
         const SPEED_KMH = 14.5;
@@ -138,6 +139,7 @@
         let allWaypoints = [];
         let routePolylines = [];
         let cameraCones = [];
+        let overlapOverlays = [];
         let activeCone = null;
         let isDraggingCone = false;
         let isCheckboxMenuOpen = false;
@@ -353,6 +355,92 @@
             map.dragging.disable();
         }
 
+        function getConePolygon(latlng, bearing, angle) {
+            const halfAngle = angle / 2;
+            const startBearing = bearing - halfAngle;
+            const endBearing = bearing + halfAngle;
+
+            const points = [];
+            points.push([latlng.lng, latlng.lat]);
+
+            for (let b = startBearing; b <= endBearing; b += 2) {
+                const rad = (b * Math.PI) / 180;
+                const newLat = latlng.lat + (CONE_RADIUS / 111000) * Math.cos(rad);
+                const newLng = latlng.lng + (CONE_RADIUS / 111000 / Math.cos(latlng.lat * Math.PI / 180)) * Math.sin(rad);
+                points.push([newLng, newLat]);
+            }
+            points.push([latlng.lng, latlng.lat]);
+
+            return turf.polygon([points]);
+        }
+
+        function pointInCone(point, coneCenter, bearing, angle) {
+            const distance = map.distance(point, coneCenter);
+            if (distance > CONE_RADIUS) return false;
+
+            const halfAngle = angle / 2;
+            const dx = point.lng - coneCenter.lng;
+            const dy = point.lat - coneCenter.lat;
+
+            let pointBearing = Math.atan2(dx, dy) * 180 / Math.PI;
+            pointBearing = (pointBearing + 360) % 360;
+
+            const bearingDiff = Math.abs(bearing - pointBearing);
+            const normalizedDiff = bearingDiff > 180 ? 360 - bearingDiff : bearingDiff;
+
+            return normalizedDiff <= halfAngle;
+        }
+
+        function checkAndHighlightOverlaps() {
+            overlapOverlays.forEach(overlay => map.removeLayer(overlay));
+            overlapOverlays = [];
+
+            for (let i = 0; i < allWaypoints.length; i++) {
+                for (let j = i + 1; j < allWaypoints.length; j++) {
+                    const wp1 = allWaypoints[i];
+                    const wp2 = allWaypoints[j];
+
+                    const distance = map.distance(wp1.latlng, wp2.latlng);
+                    if (distance > CONE_RADIUS * 2) continue;
+
+                    try {
+                        const cone1 = getConePolygon(wp1.latlng, wp1.bearing, DEFAULT_CAMERA_ANGLE);
+                        const cone2 = getConePolygon(wp2.latlng, wp2.bearing, DEFAULT_CAMERA_ANGLE);
+
+                        if (turf.booleanIntersects(cone1, cone2)) {
+                            const intersection = turf.intersect(cone1, cone2);
+
+                            if (intersection && intersection.geometry && intersection.geometry.coordinates) {
+                                let coords = intersection.geometry.coordinates;
+
+                                if (intersection.geometry.type === 'Polygon') {
+                                    coords = coords[0];
+                                } else if (intersection.geometry.type === 'MultiPolygon') {
+                                    coords = coords[0][0];
+                                }
+
+                                if (coords && coords.length > 2) {
+                                    const latLngs = coords.map(c => [c[1], c[0]]);
+
+                                    const overlay = L.polygon(latLngs, {
+                                        color: '#ff0000',
+                                        fillColor: '#ff0000',
+                                        fillOpacity: 0.35,
+                                        weight: 1,
+                                        interactive: false
+                                    }).addTo(map);
+
+                                    overlapOverlays.push(overlay);
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        console.log('Overlap error:', e);
+                    }
+                }
+            }
+        }
+
         function confirmWaypoint() {
             if (!activeCone || !currentWaypointSystem) return;
 
@@ -374,6 +462,7 @@
             activeCone.setStyle({ color: '#00ff00', weight: 2, opacity: 0.4 });
             activeCone = null;
 
+            checkAndHighlightOverlaps();
             map.dragging.enable();
         }
 
@@ -487,6 +576,8 @@
             allWaypoints = [];
             cameraCones.forEach(c => map.removeLayer(c));
             cameraCones = [];
+            overlapOverlays.forEach(overlay => map.removeLayer(overlay));
+            overlapOverlays = [];
             systems.forEach(system => {
                 system.waypoints = [];
             });
