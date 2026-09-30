@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Planner - Sensor View</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <style>
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+        }
+        #map {
+            height: 100vh;
+            width: 100vw;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        input[type="number"], button {
+            margin: 0;
+            padding: 5px;
+            border: none;
+            border-radius: 15px; /* Change this value to adjust roundness */
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        input[type="number"] {
+            width: 150px;
+        }
+        .sensor-label {
+            background-color: rgba(255, 255, 255, 0.8);
+            padding: 5px;
+            border-radius: 3px;
+            display: flex;
+            align-items: center;
+            z-index: 1000; /* Ensure it's above map elements */
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.5); /* Add shadow for better visibility */
+        }
+        .sensor-label input[type="checkbox"] {
+            margin-right: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <label for="latitude">Latitude:</label>
+        <input type="number" id="latitude" step="any" value="40.7128">
+        <label for="longitude">Longitude:</label>
+        <input type="number" id="longitude" step="any" value="-74.0060">
+        <button onclick="goToLocation()">Go To Location</button>
+        <button onclick="clearSensors()">Clear All Sensors</button>
+    </div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <script>
+        // Initialize the map
+        let map = L.map('map', {
+            center: [40.7128, -74.0060],
+            zoom: 13,
+            zoomControl: false,
+            layers: [
+                L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+                    attribution: '&copy; Esri, Maxar, Earthstar Geographics',
+                    maxZoom: 19
+                })
+            ]
+        });
+
+        // Move zoom controls to the top right corner
+        L.control.zoom({ position: 'topright' }).addTo(map);
+
+        let sensors = [];
+
+        function addSensor(latlng) {
+            const sensorRadiusFeet = 1968;
+            const sensorRadiusMeters = sensorRadiusFeet * 0.3048; // Convert feet to meters
+
+            // Check if the clicked location's center is too close to any existing sensors
+            const isTooClose = sensors.some(sensor => {
+                const distance = map.distance(latlng, sensor.latlng); // Use Leaflet's distance method
+                return distance < sensorRadiusMeters; // Check if the distance is less than the sensor's radius
+            });
+
+            // If too close to another sensor, do not add a new sensor
+            if (isTooClose) {
+                return; // Exit the function if the click is within another sensor's radius
+            }
+
+            // Draw three concentric circles with different colors
+            const colors = ['#ff6a00', '#ffff00', '#1aff00']; // Red, Orange, Yellow
+            const opacities = [0.2, 0.2, 0.2]; // Different transparencies
+
+            const circles = colors.map((color, index) => {
+                const radius = sensorRadiusMeters * ((3 - index) / 3);
+                const circle = L.circle(latlng, {
+                    color: color,
+                    fillColor: color,
+                    fillOpacity: opacities[index],
+                    radius: radius,
+                    interactive: true // Make circle interactive
+                }).addTo(map);
+
+                // Add click event to the innermost circle to show the receiver checkbox
+                if (index === 2) { // Only for the green zone
+                    circle.on('click', function () {
+                        showReceiverCheckbox(circles);
+                    });
+                }
+
+                return circle;
+            });
+
+            // Store sensor information
+            sensors.push({ circles, latlng, receiver: false });
+        }
+
+        function showReceiverCheckbox(circles) {
+            // Remove existing popups
+            sensors.forEach(sensor => {
+                sensor.circles.forEach(circle => {
+                    circle.closePopup(); // Close any existing popups
+                });
+            });
+
+            // Create a div for the sensor label with the checkbox
+            const sensorLabel = L.DomUtil.create('div', 'sensor-label');
+            sensorLabel.innerHTML = `
+                <label>
+                    <input type="checkbox" onchange="toggleReceiver(${sensors.length - 1})">
+                    Receiver
+                </label>
+            `;
+
+            // Create a popup with the receiver checkbox
+            const popup = L.popup()
+                .setContent(sensorLabel)
+                .setLatLng(circles[2].getLatLng()); // Position it at the green circle's center
+            circles[2].bindPopup(popup).openPopup(); // Bind and open popup for the green circle
+        }
+
+        function updateSensor(index) {
+            const sensor = sensors[index];
+            const isReceiver = sensor.receiver;
+            const baseRadiusFeet = 1968;
+            const sensorRadiusFeet = isReceiver ? baseRadiusFeet * 1.3 : baseRadiusFeet;
+            const sensorRadiusMeters = sensorRadiusFeet * 0.3048;
+
+            // Remove the existing circles
+            sensor.circles.forEach(circle => map.removeLayer(circle));
+
+            // Redraw the circles with updated radius
+            const colors = ['#ff6a00', '#ffff00', '#1aff00']; // Red, Orange, Yellow
+            const opacities = [0.2, 0.2, 0.2]; // Different transparencies
+
+            const circles = colors.map((color, index) => {
+                const radius = sensorRadiusMeters * ((3 - index) / 3);
+                const circle = L.circle(sensor.latlng, {
+                    color: color,
+                    fillColor: color,
+                    fillOpacity: opacities[index],
+                    radius: radius,
+                    interactive: true // Make circle interactive
+                }).addTo(map);
+
+                // Add click event to the innermost circle to show the receiver checkbox
+                if (index === 2) { // Only for the green zone
+                    circle.on('click', function () {
+                        showReceiverCheckbox(circles);
+                    });
+                }
+
+                return circle;
+            });
+
+            // Update the sensor with new circles
+            sensor.circles = circles; // Store updated circles
+        }
+
+        function toggleReceiver(index) {
+            sensors[index].receiver = !sensors[index].receiver; // Toggle receiver state
+            updateSensor(index); // Update the sensor
+        }
+
+        function clearSensors() {
+            sensors.forEach(sensor => {
+                sensor.circles.forEach(circle => map.removeLayer(circle));
+            });
+            sensors = [];
+        }
+
+        function goToLocation() {
+            const lat = parseFloat(document.getElementById('latitude').value);
+            const lng = parseFloat(document.getElementById('longitude').value);
+            map.setView([lat, lng], 13);
+        }
+
+        map.on('click', function(e) {
+            addSensor(e.latlng);
+        });
+    </script>
+</body>
+</html>
