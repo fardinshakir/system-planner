@@ -31,7 +31,7 @@
             margin: 0;
             padding: 5px;
             border: none;
-            border-radius: 15px; /* Change this value to adjust roundness */
+            border-radius: 15px;
         }
         button {
             background-color: #007bff;
@@ -50,8 +50,8 @@
             border-radius: 3px;
             display: flex;
             align-items: center;
-            z-index: 1000; /* Ensure it's above map elements */
-            box-shadow: 0 0 5px rgba(0, 0, 0, 0.5); /* Add shadow for better visibility */
+            z-index: 1000;
+            box-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
         }
         .sensor-label input[type="checkbox"] {
             margin-right: 5px;
@@ -71,7 +71,6 @@
 
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
     <script>
-        // Initialize the map
         let map = L.map('map', {
             center: [40.7128, -74.0060],
             zoom: 13,
@@ -84,29 +83,25 @@
             ]
         });
 
-        // Move zoom controls to the top right corner
         L.control.zoom({ position: 'topright' }).addTo(map);
 
         let sensors = [];
 
         function addSensor(latlng) {
             const sensorRadiusFeet = 1968;
-            const sensorRadiusMeters = sensorRadiusFeet * 0.3048; // Convert feet to meters
+            const sensorRadiusMeters = sensorRadiusFeet * 0.3048;
 
-            // Check if the clicked location's center is too close to any existing sensors
             const isTooClose = sensors.some(sensor => {
-                const distance = map.distance(latlng, sensor.latlng); // Use Leaflet's distance method
-                return distance < sensorRadiusMeters; // Check if the distance is less than the sensor's radius
+                const distance = map.distance(latlng, sensor.latlng);
+                return distance < sensorRadiusMeters;
             });
 
-            // If too close to another sensor, do not add a new sensor
             if (isTooClose) {
-                return; // Exit the function if the click is within another sensor's radius
+                return;
             }
 
-            // Draw three concentric circles with different colors
-            const colors = ['#ff6a00', '#ffff00', '#1aff00']; // Red, Orange, Yellow
-            const opacities = [0.2, 0.2, 0.2]; // Different transparencies
+            const colors = ['#ff6a00', '#ffff00', '#1aff00'];
+            const opacities = [0.2, 0.2, 0.2];
 
             const circles = colors.map((color, index) => {
                 const radius = sensorRadiusMeters * ((3 - index) / 3);
@@ -115,11 +110,10 @@
                     fillColor: color,
                     fillOpacity: opacities[index],
                     radius: radius,
-                    interactive: true // Make circle interactive
+                    interactive: true
                 }).addTo(map);
 
-                // Add click event to the innermost circle to show the receiver checkbox
-                if (index === 2) { // Only for the green zone
+                if (index === 2) {
                     circle.on('click', function () {
                         showReceiverCheckbox(circles);
                     });
@@ -128,19 +122,16 @@
                 return circle;
             });
 
-            // Store sensor information
             sensors.push({ circles, latlng, receiver: false });
         }
 
         function showReceiverCheckbox(circles) {
-            // Remove existing popups
             sensors.forEach(sensor => {
                 sensor.circles.forEach(circle => {
-                    circle.closePopup(); // Close any existing popups
+                    circle.closePopup();
                 });
             });
 
-            // Create a div for the sensor label with the checkbox
             const sensorLabel = L.DomUtil.create('div', 'sensor-label');
             sensorLabel.innerHTML = `
                 <label>
@@ -149,11 +140,10 @@
                 </label>
             `;
 
-            // Create a popup with the receiver checkbox
             const popup = L.popup()
                 .setContent(sensorLabel)
-                .setLatLng(circles[2].getLatLng()); // Position it at the green circle's center
-            circles[2].bindPopup(popup).openPopup(); // Bind and open popup for the green circle
+                .setLatLng(circles[2].getLatLng());
+            circles[2].bindPopup(popup).openPopup();
         }
 
         function updateSensor(index) {
@@ -163,12 +153,10 @@
             const sensorRadiusFeet = isReceiver ? baseRadiusFeet * 1.3 : baseRadiusFeet;
             const sensorRadiusMeters = sensorRadiusFeet * 0.3048;
 
-            // Remove the existing circles
             sensor.circles.forEach(circle => map.removeLayer(circle));
 
-            // Redraw the circles with updated radius
-            const colors = ['#ff6a00', '#ffff00', '#1aff00']; // Red, Orange, Yellow
-            const opacities = [0.2, 0.2, 0.2]; // Different transparencies
+            const colors = ['#ff6a00', '#ffff00', '#1aff00'];
+            const opacities = [0.2, 0.2, 0.2];
 
             const circles = colors.map((color, index) => {
                 const radius = sensorRadiusMeters * ((3 - index) / 3);
@@ -177,11 +165,10 @@
                     fillColor: color,
                     fillOpacity: opacities[index],
                     radius: radius,
-                    interactive: true // Make circle interactive
+                    interactive: true
                 }).addTo(map);
 
-                // Add click event to the innermost circle to show the receiver checkbox
-                if (index === 2) { // Only for the green zone
+                if (index === 2) {
                     circle.on('click', function () {
                         showReceiverCheckbox(circles);
                     });
@@ -190,13 +177,12 @@
                 return circle;
             });
 
-            // Update the sensor with new circles
-            sensor.circles = circles; // Store updated circles
+            sensor.circles = circles;
         }
 
         function toggleReceiver(index) {
-            sensors[index].receiver = !sensors[index].receiver; // Toggle receiver state
-            updateSensor(index); // Update the sensor
+            sensors[index].receiver = !sensors[index].receiver;
+            updateSensor(index);
         }
 
         function clearSensors() {

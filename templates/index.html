@@ -6,7 +6,6 @@
     <title>System Planner</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
     <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@700&display=swap" rel="stylesheet">
-    <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet" />
     <style>
         body {
             margin: 0;
@@ -46,6 +45,14 @@
         #controls button:hover {
             background-color: #0056b3;
         }
+        #controls button.route-btn {
+            background-color: #28a745;
+            font-size: 12px;
+            padding: 6px;
+        }
+        #controls button.route-btn:hover {
+            background-color: #218838;
+        }
         #search {
             margin-top: 10px;
             padding: 8px;
@@ -79,20 +86,41 @@
             border-radius: 5px;
             font-size: 14px;
         }
+        #routeInfo {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 10px 15px;
+            border-radius: 5px;
+            z-index: 1000;
+            font-size: 12px;
+            display: none;
+        }
     </style>
 </head>
 <body>
     <div id="controls">
         <button onclick="clearSystems()">Clear All</button>
         <button onclick="removeLastSystem()">Remove Last</button>
+        <button onclick="generateOrderedRoute()" class="route-btn">Generate Ordered Route</button>
+        <button onclick="generateRandomRoute()" class="route-btn">Generate Random Route</button>
+        <button onclick="clearRoute()" class="route-btn">Clear Route</button>
         <input type="text" id="search" placeholder="Search location..." autocomplete="off">
         <div id="suggestions"></div>
     </div>
+    <div id="routeInfo"></div>
     <div id="map"></div>
 
     <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 
     <script>
+        const SPEED_KMH = 14.5;
+        const SPEED_MS = SPEED_KMH / 3.6;
+        const DEFAULT_CAMERA_ANGLE = 100;
+        const CONE_RADIUS = 60.96;
+
         const map = L.map('map', {
             center: [40.7128, -74.0060],
             zoom: 13,
@@ -107,6 +135,13 @@
         L.control.zoom({ position: 'topright' }).addTo(map);
 
         let systems = [];
+        let allWaypoints = [];
+        let routePolylines = [];
+        let cameraCones = [];
+        let activeCone = null;
+        let isDraggingCone = false;
+        let isCheckboxMenuOpen = false;
+        let currentWaypointSystem = null;
         const systemRadiusMeters = 599.8464;
 
         const predefinedSystems = [
@@ -117,10 +152,58 @@
             { name: 'Unit 5', lat: 40.5795, lng: -74.1502, repeater: false },
         ];
 
+        function drawCameraCone(lat, lng, bearing, angle, isActive = false) {
+            const halfAngle = angle / 2;
+            const startBearing = bearing - halfAngle;
+            const endBearing = bearing + halfAngle;
+
+            const points = [];
+            points.push([lat, lng]);
+
+            for (let b = startBearing; b <= endBearing; b += 5) {
+                const rad = (b * Math.PI) / 180;
+                const newLat = lat + (CONE_RADIUS / 111000) * Math.cos(rad);
+                const newLng = lng + (CONE_RADIUS / 111000 / Math.cos(lat * Math.PI / 180)) * Math.sin(rad);
+                points.push([newLat, newLng]);
+            }
+            points.push([lat, lng]);
+
+            const color = isActive ? '#ffff00' : '#00ff00';
+            const polygon = L.polyline(points, {
+                color: color,
+                weight: isActive ? 3 : 2,
+                opacity: isActive ? 0.8 : 0.4,
+                fillColor: color,
+                fillOpacity: isActive ? 0.2 : 0.1
+            }).addTo(map);
+
+            polygon.bearing = bearing;
+            polygon.latlng = L.latLng(lat, lng);
+            polygon.angle = angle;
+
+            if (isActive) {
+                const tipBearing = bearing * Math.PI / 180;
+                const tipLat = lat + (CONE_RADIUS / 111000) * Math.cos(tipBearing);
+                const tipLng = lng + (CONE_RADIUS / 111000 / Math.cos(lat * Math.PI / 180)) * Math.sin(tipBearing);
+
+                const handle = L.marker([tipLat, tipLng], {
+                    icon: L.divIcon({
+                        html: '<div style="width: 12px; height: 12px; background: #ffff00; border: 2px solid white; border-radius: 50%; cursor: grab;"></div>',
+                        iconSize: [12, 12]
+                    })
+                }).addTo(map);
+
+                polygon.handle = handle;
+            }
+
+            cameraCones.push(polygon);
+            return polygon;
+        }
+
         function addPredefinedSystems() {
             predefinedSystems.forEach(system => {
                 const marker = L.marker([system.lat, system.lng]).addTo(map);
-                marker.bindPopup(`<b>${system.name}</b><br>Waypoints: 0`);
+                marker.bindPopup(`<b>${system.name}</b>`);
                 const increasedRadius = system.repeater ? systemRadiusMeters * 1.3 : systemRadiusMeters;
                 const colors = ['#ff6a00', '#ffff00', '#1aff00'];
                 const opacities = [0.0, 0.0, 0.0];
@@ -136,39 +219,18 @@
             });
         }
 
-        function isWithinSystemRadius(system, latlng) {
-            return map.distance(latlng, system.latlng) < systemRadiusMeters;
-        }
-
         function addSystem(latlng) {
             const isTooClose = systems.some(system => map.distance(latlng, system.latlng) < systemRadiusMeters);
             const isInPredefinedSystem = predefinedSystems.some(system => map.distance(latlng, [system.lat, system.lng]) < systemRadiusMeters);
 
-            const isInExtendedRadius = systems.some(system => {
-                const effectiveRadius = system.hasReceiver ? systemRadiusMeters * 1.3 : systemRadiusMeters;
-                return map.distance(latlng, system.latlng) < effectiveRadius;
-            });
-
-            if (isTooClose || isInPredefinedSystem || isInExtendedRadius) return;
-
-            systems.forEach(system => {
-                if (system.waypointMode) {
-                    system.waypointMode = false;
-                    system.waypointCounter = 0
-                    system.waypoints.forEach(waypoint => {
-                        map.removeLayer(waypoint);
-                    });
-                    system.waypoints = [];
-                }
-            });
+            if (isTooClose || isInPredefinedSystem) return;
 
             const system = {
                 latlng,
-                hasReceiver: false,
                 waypointMode: false,
+                hasReceiver: false,
                 circles: [],
                 checkboxMarker: null,
-                waypointCounter: 0,
                 waypoints: []
             };
 
@@ -188,39 +250,8 @@
                 if (index === 2) {
                     circle.on('contextmenu', function(e) {
                         L.DomEvent.stopPropagation(e);
-
                         isCheckboxMenuOpen = true;
-                        checkboxMenuElement = e.target;
-
-                        systems.forEach(s => {
-                            if (s.checkboxMarker) {
-                                map.removeLayer(s.checkboxMarker);
-                                s.checkboxMarker = null;
-                            }
-                        });
-
-                        const checkboxDiv = L.DomUtil.create('div', 'checkbox-marker');
-                        const currentSystemIndex = systems.indexOf(system);
-
-                        checkboxDiv.innerHTML =
-                            `<input type="checkbox" id="waypointCheckbox-${currentSystemIndex}" ${system.waypointMode ? 'checked' : ''} onchange="toggleWaypointMode(${currentSystemIndex}, this.checked); event.stopPropagation();">
-                            <label for="waypointCheckbox-${currentSystemIndex}">Waypoint Mode</label>
-                            <br>
-                            <input type="checkbox" id="receiverCheckbox-${currentSystemIndex}" ${system.hasReceiver ? 'checked' : ''} onchange="toggleReceiver(systems[${currentSystemIndex}]); event.stopPropagation();">
-                            <label for="receiverCheckbox-${currentSystemIndex}">Receiver</label>`;
-
-                        system.checkboxMarker = L.marker(latlng, {
-                            icon: L.divIcon({
-                                className: 'checkbox-marker',
-                                html: checkboxDiv.outerHTML,
-                                iconSize: [120, 80]
-                            })
-                        }).addTo(map);
-
-                        system.checkboxMarker.setLatLng(latlng);
-                        system.checkboxMarker.on('click', function(e) {
-                            e.originalEvent.stopPropagation();
-                        });
+                        showWaypointToggle(system);
                     });
                 }
 
@@ -231,89 +262,72 @@
             updateSystemPopup(system);
         }
 
-        function closeContextMenu() {
-            if (isCheckboxMenuOpen) {
-                isCheckboxMenuOpen = false;
-                checkboxMenuElement = null;
-                //console.log("closed menu");
-            }
+        function showWaypointToggle(system) {
+            systems.forEach(s => {
+                if (s.checkboxMarker) {
+                    map.removeLayer(s.checkboxMarker);
+                    s.checkboxMarker = null;
+                }
+            });
+
+            const checkboxDiv = L.DomUtil.create('div', 'checkbox-marker');
+            const systemIndex = systems.indexOf(system);
+
+            checkboxDiv.innerHTML = `
+                <input type="checkbox" id="waypointCheckbox-${systemIndex}" ${system.waypointMode ? 'checked' : ''} onchange="toggleWaypointMode(${systemIndex}, this.checked); event.stopPropagation();">
+                <label for="waypointCheckbox-${systemIndex}">Waypoint Mode</label>
+                <br>
+                <input type="checkbox" id="receiverCheckbox-${systemIndex}" ${system.hasReceiver ? 'checked' : ''} onchange="toggleReceiver(${systemIndex}); event.stopPropagation();">
+                <label for="receiverCheckbox-${systemIndex}">Receiver</label>
+            `;
+
+            system.checkboxMarker = L.marker(system.latlng, {
+                icon: L.divIcon({
+                    className: 'checkbox-marker',
+                    html: checkboxDiv.outerHTML,
+                    iconSize: [120, 80]
+                })
+            }).addTo(map);
+
+            system.checkboxMarker.on('click', function(e) {
+                e.originalEvent.stopPropagation();
+            });
         }
 
-        function toggleReceiver(system) {
-            const wasReceiverEnabled = system.hasReceiver;
+        function toggleReceiver(systemIndex) {
+            const system = systems[systemIndex];
             system.hasReceiver = !system.hasReceiver;
 
-            const factor = system.hasReceiver ? 1.3 : 1.0;
             system.circles.forEach((circle, index) => {
+                const factor = system.hasReceiver ? 1.3 : 1.0;
                 const radius = systemRadiusMeters * factor * ((3 - index) / 3);
                 circle.setRadius(radius);
             });
 
-            if (!system.hasReceiver) {
-                const effectiveRadius = systemRadiusMeters;
-                system.waypoints = system.waypoints.filter(waypoint => {
-                    const distance = map.distance(system.latlng, waypoint.getLatLng());
-                    if (distance > effectiveRadius) {
-                        map.removeLayer(waypoint);
-                        return false;
-                    }
-                    return true;
-                });
-
-                system.waypointCounter = system.waypoints.length;
-                updateWaypointsPopup(system);
-                updateSystemPopup(system);
-            }
-
             if (system.checkboxMarker) {
                 map.removeLayer(system.checkboxMarker);
                 system.checkboxMarker = null;
             }
         }
-
-
-        function updateWaypointsPopup(system) {
-            system.waypoints.forEach((waypoint, index) => {
-                waypoint.bindPopup(`Waypoint ${index + 1}`);
-            });
-        }
-
-        let currentWaypointSystem = null;
-        let lastClickedLatLng = null;
-        let isCheckboxMenuOpen = false;
-        let checkboxMenuElement = null;
 
         function toggleWaypointMode(systemIndex, isChecked) {
             const system = systems[systemIndex];
-            console.log(`Before toggling: Waypoint Mode ${isChecked ? "Enabled" : "Disabled"}`);
-            console.log(`Number of waypoints for System ${systemIndex}: ${system.waypoints.length}`);
+            system.waypointMode = isChecked;
+
             if (isChecked) {
-                if (lastClickedLatLng) {
-                    const effectiveRadius = system.hasReceiver ? systemRadiusMeters * 1.3 : systemRadiusMeters;
-                    const distance = map.distance(system.latlng, lastClickedLatLng);
-
-                    if (distance <= effectiveRadius) {
-                        const waypoint = L.marker(lastClickedLatLng).addTo(map);
-                        waypoint.bindPopup(`Waypoint ${system.waypointCounter + 1}`).openPopup();
-                        system.waypoints.push(waypoint);
-                        updateSystemPopup(system);
-                    }
-                }
-
-                if (currentWaypointSystem !== null) {
+                if (currentWaypointSystem && currentWaypointSystem !== system) {
                     currentWaypointSystem.waypointMode = false;
-                    map.off('click', handleMapClick);
                 }
-
                 currentWaypointSystem = system;
-                system.waypointMode = true;
-                map.on('click', handleMapClick);
             } else {
-                lastClickedLatLng = system.latlng;
-
-                map.off('click', handleMapClick);
-                system.waypointMode = false;
                 currentWaypointSystem = null;
+                if (activeCone && activeCone.handle) {
+                    map.removeLayer(activeCone.handle);
+                }
+                if (activeCone) {
+                    map.removeLayer(activeCone);
+                }
+                activeCone = null;
             }
 
             if (system.checkboxMarker) {
@@ -322,25 +336,46 @@
             }
         }
 
+        function createWaypoint(latlng) {
+            if (!currentWaypointSystem) return;
 
-        function handleMapClick(e) {
-            if (!currentWaypointSystem || !currentWaypointSystem.waypointMode || isCheckboxMenuOpen) return;
-
-            const system = currentWaypointSystem;
-            const effectiveRadius = system.hasReceiver ? systemRadiusMeters * 1.3 : systemRadiusMeters;
-            const distance = map.distance(system.latlng, e.latlng);
-
-            if (distance <= effectiveRadius) {
-                const waypoint = L.marker(e.latlng).addTo(map);
-                waypoint.bindPopup(`Waypoint ${system.waypointCounter + 1}`).openPopup();
-                system.waypoints.push(waypoint);
-                system.waypointCounter++;
-
-                updateSystemPopup(system);
+            if (activeCone && activeCone.handle) {
+                map.removeLayer(activeCone.handle);
             }
+            if (activeCone) {
+                map.removeLayer(activeCone);
+            }
+
+            activeCone = drawCameraCone(latlng.lat, latlng.lng, 0, DEFAULT_CAMERA_ANGLE, true);
+            activeCone.systemIndex = systems.indexOf(currentWaypointSystem);
+            activeCone.latlng = latlng;
+
+            map.dragging.disable();
         }
 
+        function confirmWaypoint() {
+            if (!activeCone || !currentWaypointSystem) return;
 
+            const waypoint = {
+                latlng: activeCone.latlng,
+                bearing: activeCone.bearing,
+                cameraAngle: DEFAULT_CAMERA_ANGLE
+            };
+
+            allWaypoints.push(waypoint);
+            currentWaypointSystem.waypoints.push(waypoint);
+
+            const marker = L.marker(activeCone.latlng).addTo(map);
+            marker.bindPopup(`<b>Waypoint ${allWaypoints.length}</b><br>Bearing: ${Math.round(activeCone.bearing)}°`);
+
+            if (activeCone.handle) {
+                map.removeLayer(activeCone.handle);
+            }
+            activeCone.setStyle({ color: '#00ff00', weight: 2, opacity: 0.4 });
+            activeCone = null;
+
+            map.dragging.enable();
+        }
 
         function updateSystemPopup(system) {
             const index = systems.indexOf(system);
@@ -350,54 +385,121 @@
             }
 
             const marker = L.marker(system.latlng).addTo(map);
-            marker.bindPopup(`<b>System ${index + 1}</b><br>Waypoints: ${system.waypointCounter}`);
-
+            marker.bindPopup(`<b>System ${index + 1}</b><br>Waypoints: ${system.waypoints.length}`);
             marker.openPopup();
             system.marker = marker;
+        }
+
+        function calculateDistance(latlng1, latlng2) {
+            return map.distance(latlng1, latlng2);
+        }
+
+        function drawRoute(orderedWaypoints) {
+            clearRoute();
+
+            if (orderedWaypoints.length < 2) {
+                alert('Add at least 2 waypoints');
+                return;
+            }
+
+            let totalDistance = 0;
+            let totalTime = 0;
+
+            for (let i = 0; i < orderedWaypoints.length - 1; i++) {
+                const distance = calculateDistance(orderedWaypoints[i].latlng, orderedWaypoints[i + 1].latlng);
+                totalDistance += distance;
+
+                const line = L.polyline([orderedWaypoints[i].latlng, orderedWaypoints[i + 1].latlng], {
+                    color: '#ff0000',
+                    weight: 3,
+                    opacity: 0.7
+                }).addTo(map);
+
+                routePolylines.push(line);
+
+                const time = distance / SPEED_MS;
+                totalTime += time;
+
+                const midpoint = [
+                    (orderedWaypoints[i].latlng.lat + orderedWaypoints[i + 1].latlng.lat) / 2,
+                    (orderedWaypoints[i].latlng.lng + orderedWaypoints[i + 1].latlng.lng) / 2
+                ];
+
+                const label = L.marker(midpoint, {
+                    icon: L.divIcon({
+                        className: 'route-label',
+                        html: `<div style="background: white; padding: 4px 8px; border-radius: 4px; font-size: 11px; color: black; font-weight: bold;">${(distance / 1000).toFixed(2)}km<br>${(time / 60).toFixed(1)}min</div>`,
+                        iconSize: [60, 40]
+                    })
+                }).addTo(map);
+
+                routePolylines.push(label);
+            }
+
+            const hours = Math.floor(totalTime / 3600);
+            const minutes = Math.floor((totalTime % 3600) / 60);
+            const seconds = Math.floor(totalTime % 60);
+
+            const infoDiv = document.getElementById('routeInfo');
+            infoDiv.innerHTML = `
+                <div><b>Route Generated</b></div>
+                <div>Total Distance: ${(totalDistance / 1000).toFixed(2)} km</div>
+                <div>Total Time: ${hours}h ${minutes}m ${seconds}s</div>
+            `;
+            infoDiv.style.display = 'block';
+        }
+
+        function generateOrderedRoute() {
+            drawRoute(allWaypoints);
+        }
+
+        function generateRandomRoute() {
+            const shuffled = [...allWaypoints].sort(() => Math.random() - 0.5);
+            drawRoute(shuffled);
+        }
+
+        function clearRoute() {
+            routePolylines.forEach(line => map.removeLayer(line));
+            routePolylines = [];
+            document.getElementById('routeInfo').style.display = 'none';
         }
 
         function clearSystems() {
             systems.forEach(system => {
                 system.circles.forEach(circle => map.removeLayer(circle));
-
-                system.waypoints.forEach(waypoint => map.removeLayer(waypoint));
-
                 if (system.checkboxMarker) map.removeLayer(system.checkboxMarker);
                 if (system.marker) map.removeLayer(system.marker);
-
-                system.waypointCounter = 0;
             });
-
             systems = [];
+            clearWaypoints();
         }
-
 
         function removeLastSystem() {
             if (systems.length > 0) {
                 const lastSystem = systems.pop();
-
                 lastSystem.circles.forEach(circle => map.removeLayer(circle));
-
-                lastSystem.waypoints.forEach(waypoint => {
-                    map.removeLayer(waypoint);
-                });
-
-                lastSystem.waypoints = [];
-
                 if (lastSystem.checkboxMarker) map.removeLayer(lastSystem.checkboxMarker);
                 if (lastSystem.marker) map.removeLayer(lastSystem.marker);
-
-                lastSystem.circles = [];
-                lastSystem.checkboxMarker = null;
-                lastSystem.marker = null;
-                lastSystem.waypointCounter = 0;
-                lastSystem.waypointMode = false;
-
             }
         }
 
-
-
+        function clearWaypoints() {
+            allWaypoints = [];
+            cameraCones.forEach(c => map.removeLayer(c));
+            cameraCones = [];
+            systems.forEach(system => {
+                system.waypoints = [];
+            });
+            if (activeCone && activeCone.handle) {
+                map.removeLayer(activeCone.handle);
+            }
+            if (activeCone) {
+                map.removeLayer(activeCone);
+            }
+            activeCone = null;
+            currentWaypointSystem = null;
+            clearRoute();
+        }
 
         addPredefinedSystems();
 
@@ -438,21 +540,80 @@
         });
 
         map.on('click', function(e) {
-            addSystem(e.latlng);
-        });
-
-        map.on('click', function() {
-            closeContextMenu();
-        });
-
-        map.on('click', function(e) {
             if (isCheckboxMenuOpen) {
-                closeContextMenu();
+                isCheckboxMenuOpen = false;
+                return;
             }
-            closeContextMenu();
+
+            if (currentWaypointSystem && currentWaypointSystem.waypointMode) {
+                const distance = map.distance(e.latlng, currentWaypointSystem.latlng);
+                if (distance <= systemRadiusMeters) {
+                    if (activeCone) {
+                        confirmWaypoint();
+                    } else {
+                        createWaypoint(e.latlng);
+                    }
+                }
+            } else {
+                addSystem(e.latlng);
+            }
         });
 
+        function updateConeGeometry(cone, lat, lng, bearing, angle) {
+            const halfAngle = angle / 2;
+            const startBearing = bearing - halfAngle;
+            const endBearing = bearing + halfAngle;
 
+            const points = [];
+            points.push([lat, lng]);
+
+            for (let b = startBearing; b <= endBearing; b += 5) {
+                const rad = (b * Math.PI) / 180;
+                const newLat = lat + (CONE_RADIUS / 111000) * Math.cos(rad);
+                const newLng = lng + (CONE_RADIUS / 111000 / Math.cos(lat * Math.PI / 180)) * Math.sin(rad);
+                points.push([newLat, newLng]);
+            }
+            points.push([lat, lng]);
+
+            cone.setLatLngs(points);
+        }
+
+        function updateConeHandle(cone, lat, lng, bearing) {
+            if (!cone.handle) return;
+
+            const tipBearing = bearing * Math.PI / 180;
+            const tipLat = lat + (CONE_RADIUS / 111000) * Math.cos(tipBearing);
+            const tipLng = lng + (CONE_RADIUS / 111000 / Math.cos(lat * Math.PI / 180)) * Math.sin(tipBearing);
+
+            cone.handle.setLatLng([tipLat, tipLng]);
+        }
+
+        map.on('mousemove', function(e) {
+            if (!activeCone || !isDraggingCone) return;
+
+            const origin = activeCone.latlng;
+            const mousePos = e.latlng;
+
+            const dx = mousePos.lng - origin.lng;
+            const dy = mousePos.lat - origin.lat;
+
+            let bearing = Math.atan2(dx, dy) * 180 / Math.PI;
+            bearing = (bearing + 360) % 360;
+
+            activeCone.bearing = bearing;
+            updateConeGeometry(activeCone, origin.lat, origin.lng, bearing, DEFAULT_CAMERA_ANGLE);
+            updateConeHandle(activeCone, origin.lat, origin.lng, bearing);
+        });
+
+        map.on('mousedown', function(e) {
+            if (activeCone) {
+                isDraggingCone = true;
+            }
+        });
+
+        map.on('mouseup', function() {
+            isDraggingCone = false;
+        });
 
     </script>
 </body>
